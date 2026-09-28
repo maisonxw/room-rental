@@ -143,6 +143,18 @@ export async function updateBookingStatusInFirebase(
   await updateDoc(bookingRef, { status })
 }
 
+export async function updateBookingInFirebase(
+  bookingId: string,
+  booking: Partial<BookingData>
+): Promise<void> {
+  const bookingRef = doc(db, BOOKINGS_COLLECTION, bookingId)
+  await updateDoc(bookingRef, booking)
+}
+
+export async function deleteBookingFromFirebase(bookingId: string): Promise<void> {
+  await deleteDoc(doc(db, BOOKINGS_COLLECTION, bookingId))
+}
+
 /* ==========================================================================
    3. PAYMENT SETTINGS SERVICES
    ========================================================================== */

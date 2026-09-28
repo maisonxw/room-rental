@@ -9,6 +9,7 @@ export interface Studio {
   pricePerHour: number
   rating: number
   reviewCount: number
+  quantity: number
   guests: number
   bedrooms: number
   beds: number
@@ -55,6 +56,8 @@ export interface BookingData {
   idPassport?: string
   specialRequests?: string
   rentalType?: 'hourly' | 'daily'
+  checkInTime?: string
+  checkOutTime?: string
   hoursCount?: number
   checkIn: string
   checkOut: string
@@ -110,6 +113,7 @@ export function normalizeStudio(raw: Partial<Studio> & { id?: string }): Studio 
     pricePerHour: Number(raw.pricePerHour ?? raw.price ?? 0),
     rating: Number(raw.rating ?? 4.9),
     reviewCount: Number(raw.reviewCount ?? 0),
+    quantity: Math.max(1, Number(raw.quantity ?? 1)),
     guests: Number(raw.guests ?? 6),
     bedrooms: Number(raw.bedrooms ?? 0),
     beds: Number(raw.beds ?? 0),

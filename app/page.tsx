@@ -21,8 +21,8 @@ import {
 } from 'lucide-react'
 import { Header } from '@/components/Header'
 import { Footer } from '@/components/Footer'
-import { PaymentSettings, Studio, defaultPaymentSettings, formatCurrency } from '@/lib/data'
-import { getPaymentSettingsFromFirebase, getRoomsFromFirebase } from '@/lib/firebase-services'
+import { BookingData, BookingStatus, PaymentSettings, Studio, defaultPaymentSettings, formatCurrency } from '@/lib/data'
+import { createBookingInFirebase, getBookingsFromFirebase, getPaymentSettingsFromFirebase, getRoomsFromFirebase } from '@/lib/firebase-services'
 
 type BookingStep = 'dates' | 'select' | 'details' | 'confirm'
 
@@ -38,6 +38,7 @@ const fallbackStudios: Studio[] = [
     pricePerHour: 180000,
     rating: 4.9,
     reviewCount: 42,
+    quantity: 1,
     guests: 8,
     bedrooms: 0,
     beds: 0,
@@ -67,6 +68,7 @@ const fallbackStudios: Studio[] = [
     pricePerHour: 220000,
     rating: 4.8,
     reviewCount: 36,
+    quantity: 1,
     guests: 10,
     bedrooms: 0,
     beds: 0,
@@ -112,11 +114,23 @@ const depositOptions = [
   { value: 'contact', label: 'Liên hệ studio để xác nhận phương thức cọc' },
 ]
 
+const blockingBookingStatuses = new Set<BookingStatus>(['da_xac_nhan', 'dang_thue', 'confirmed'])
+
 function getHours(startTime: string, endTime: string) {
   if (!startTime || !endTime) return 0
   const start = Number(startTime.split(':')[0])
   const end = Number(endTime.split(':')[0])
   return Math.max(0, end - start)
+}
+
+function timeToMinutes(value?: string) {
+  if (!value) return 0
+  const [hours, minutes] = value.split(':').map(Number)
+  return (hours || 0) * 60 + (minutes || 0)
+}
+
+function rangesOverlap(startA: number, endA: number, startB: number, endB: number) {
+  return startA < endB && startB < endA
 }
 
 function formatDate(value: string) {
@@ -151,6 +165,7 @@ function getCalendarDays(monthDate: Date) {
 
 export default function HomePage() {
   const [allListings, setAllListings] = useState<Studio[]>([])
+  const [bookingsList, setBookingsList] = useState<BookingData[]>([])
   const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(defaultPaymentSettings)
   const [selectedStudioId, setSelectedStudioId] = useState('')
   const [step, setStep] = useState<BookingStep>('dates')
@@ -168,15 +183,17 @@ export default function HomePage() {
   const [depositMethod, setDepositMethod] = useState('bank-transfer')
   const [depositPickerOpen, setDepositPickerOpen] = useState(false)
   const [submitted, setSubmitted] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
     let active = true
 
-    Promise.all([getRoomsFromFirebase(), getPaymentSettingsFromFirebase()])
-      .then(([rooms, settings]) => {
+    Promise.all([getRoomsFromFirebase(), getPaymentSettingsFromFirebase(), getBookingsFromFirebase()])
+      .then(([rooms, settings, bookings]) => {
         if (!active) return
         setAllListings(rooms.length > 0 ? rooms : fallbackStudios)
         setPaymentSettings(settings)
+        setBookingsList(bookings)
       })
       .catch(() => {
         if (active) setAllListings(fallbackStudios)
@@ -197,6 +214,32 @@ export default function HomePage() {
   const phoneValid = customerPhone === '' || /^[0-9]{9,11}$/.test(customerPhone)
   const selectedDepositLabel = depositOptions.find((option) => option.value === depositMethod)?.label ?? depositOptions[0].label
   const transferContent = `${paymentSettings.noteSyntax} ${customerPhone || 'SDT'}`
+
+  function doesBookingOverlapSelection(booking: BookingData) {
+    if (!startDate || booking.checkIn !== startDate) return false
+
+    if (booking.rentalType === 'daily') return true
+
+    const selectedStart = timeToMinutes(startTime)
+    const selectedEnd = timeToMinutes(endTime)
+    const bookingStart = timeToMinutes(booking.checkInTime || '00:00')
+    const bookingEnd = booking.checkOutTime
+      ? timeToMinutes(booking.checkOutTime)
+      : bookingStart + Math.max(1, Number(booking.hoursCount || 1)) * 60
+
+    return rangesOverlap(selectedStart, selectedEnd, bookingStart, bookingEnd)
+  }
+
+  function getAvailableQuantity(studio: Studio) {
+    const totalQuantity = Math.max(1, Number(studio.quantity || 1))
+    const blockedCount = bookingsList.filter((booking) => (
+      booking.studioId === studio.id &&
+      blockingBookingStatuses.has(booking.status) &&
+      doesBookingOverlapSelection(booking)
+    )).length
+
+    return Math.max(0, totalQuantity - blockedCount)
+  }
 
   function goToStep(nextStep: BookingStep) {
     const currentIndex = stepsConfig.findIndex((item) => item.key === step)
@@ -226,6 +269,55 @@ export default function HomePage() {
 
   function isDetailsValid() {
     return Boolean(customerName && customerPhone && customerEmail && depositMethod && phoneValid)
+  }
+
+  async function handleCustomerBookingSubmit() {
+    if (!selectedStudio || submitting) return
+
+    if (getAvailableQuantity(selectedStudio) <= 0) {
+      setStepError('PhÃ²ng nÃ y vá»«a háº¿t lá»‹ch trong khung giá» báº¡n chá»n. Vui lÃ²ng chá»n phÃ²ng hoáº·c khá»ung giá» khÃ¡c.')
+      setStep('select')
+      return
+    }
+
+    setSubmitting(true)
+
+    const bookingCode = `CHUP-${Math.floor(100000 + Math.random() * 900000)}`
+    const bookingData: Omit<BookingData, 'id'> = {
+      code: bookingCode,
+      studioId: selectedStudio.id,
+      studioName: selectedStudio.name,
+      studioImage: selectedStudio.images?.[0] || '',
+      studioAddress: selectedStudio.address,
+      customerName,
+      customerPhone,
+      customerEmail,
+      specialRequests: note,
+      rentalType: 'hourly',
+      checkIn: startDate,
+      checkOut: '',
+      checkInTime: startTime,
+      checkOutTime: endTime,
+      hoursCount: rentalQuantity,
+      nights: 0,
+      guests: 1,
+      totalPrice,
+      depositPrice,
+      status: 'chua_xac_nhan',
+      createdAt: new Date().toISOString(),
+    }
+
+    try {
+      const bookingId = await createBookingInFirebase(bookingData)
+      setBookingsList((prev) => [{ id: bookingId, ...bookingData }, ...prev])
+      setSubmitted(true)
+      setStepError('')
+    } catch (error) {
+      console.error('Error creating customer booking:', error)
+      setStepError('KhÃ´ng thá»ƒ gá»­i yÃªu cáº§u thuÃª phÃ²ng. Vui lÃ²ng thá»­ láº¡i.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   function shiftVisibleMonth(offset: number) {
@@ -479,57 +571,72 @@ Ghi lại khoảnh khắc theo cách của bạn! Trải nghiệm dịch vụ th
                 </div>
 
                 <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
-                  {listings.map((item) => (
-                    <article key={item.id} className={`listing-card group ${selectedStudioId === item.id ? 'selected' : ''}`}>
-                      <div className="relative aspect-[4/3] overflow-hidden rounded-xl bg-white/35">
-                        <img src={item.images[0]} alt={item.name} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" />
-                        <div className="rating absolute bottom-3 left-3">
-                          <Star size={12} fill="currentColor" className="text-yellow-400" />
-                          {item.rating} <span>({item.reviewCount})</span>
-                        </div>
-                      </div>
-                      <div className="pt-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <h3 className="text-xl font-bold text-fuchsia-950">{item.name}</h3>
-                            <p className="mt-1 flex items-center gap-1 text-sm text-fuchsia-950/60">
-                              <MapPin size={14} />
-                              {item.address}
-                            </p>
-                          </div>
-                          <Camera className="mt-1 h-5 w-5 text-pink-500" />
-                        </div>
+                  {listings.map((item) => {
+                    const availableQuantity = getAvailableQuantity(item)
+                    const isUnavailable = availableQuantity <= 0
 
-                        <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
-                          <div className="rounded-xl bg-white/45 p-3 text-center">
-                            <div className="text-[10px] font-bold uppercase text-pink-600">Giá thuê</div>
-                            <strong className="mt-1 block text-fuchsia-950">{formatCurrency(item.pricePerHour)}</strong>
+                    return (
+                      <article key={item.id} className={`listing-card group ${selectedStudioId === item.id ? 'selected' : ''} ${isUnavailable ? 'opacity-60' : ''}`}>
+                        <div className="relative aspect-[4/3] overflow-hidden rounded-xl bg-white/35">
+                          <img src={item.images[0]} alt={item.name} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" />
+                          <div className="rating absolute bottom-3 left-3">
+                            <Star size={12} fill="currentColor" className="text-yellow-400" />
+                            {item.rating} <span>({item.reviewCount})</span>
                           </div>
-                          <div className="rounded-xl border border-white/45 bg-white/55 p-3 text-center">
-                            <div className="text-[10px] font-bold uppercase text-purple-500">Sức chứa</div>
-                            <strong className="mt-1 block text-fuchsia-950">{item.guests} người</strong>
+                          <div className={`absolute right-3 top-3 rounded-full px-3 py-1 text-xs font-bold shadow-sm ${isUnavailable ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                            {isUnavailable ? 'Hết phòng' : `Còn ${availableQuantity} phòng`}
                           </div>
                         </div>
+                        <div className="pt-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <h3 className="text-xl font-bold text-fuchsia-950">{item.name}</h3>
+                              <p className="mt-1 flex items-center gap-1 text-sm text-fuchsia-950/60">
+                                <MapPin size={14} />
+                                {item.address}
+                              </p>
+                            </div>
+                            <Camera className="mt-1 h-5 w-5 text-pink-500" />
+                          </div>
 
-                        <div className="mt-4 text-xs text-fuchsia-950/60">
-                          <span className="flex items-center gap-1"><Users size={13} /> Tối đa {item.guests} người</span>
+                          <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
+                            <div className="rounded-xl bg-white/45 p-3 text-center">
+                              <div className="text-[10px] font-bold uppercase text-pink-600">Giá thuê</div>
+                              <strong className="mt-1 block text-fuchsia-950">{formatCurrency(item.pricePerHour)}</strong>
+                            </div>
+                            <div className="rounded-xl border border-white/45 bg-white/55 p-3 text-center">
+                              <div className="text-[10px] font-bold uppercase text-purple-500">Sức chứa</div>
+                              <strong className="mt-1 block text-fuchsia-950">{item.guests} người</strong>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 grid gap-1 text-xs text-fuchsia-950/60">
+                            <span className="flex items-center gap-1"><Users size={13} /> Tối đa {item.guests} người</span>
+                            <span>Tổng số lượng: {item.quantity ?? 1} phòng</span>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={isUnavailable}
+                            className="primary-button mt-4 w-full disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={() => {
+                              if (isUnavailable) {
+                                setStepError('Phòng này đã kín lịch trong khung giờ bạn chọn.')
+                                return
+                              }
+
+                              setSelectedStudioId(item.id)
+                              setStepError('')
+                              setStep('details')
+                              document.getElementById('booking-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                            }}
+                          >
+                            {isUnavailable ? 'Hết phòng trong khung giờ này' : 'Chọn thuê phòng này'}
+                          </button>
                         </div>
-
-                        <button
-                          type="button"
-                          className="primary-button mt-4 w-full"
-                          onClick={() => {
-                            setSelectedStudioId(item.id)
-                            setStepError('')
-                            setStep('details')
-                            document.getElementById('booking-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                          }}
-                        >
-                          Chọn thuê phòng này
-                        </button>
-                      </div>
-                    </article>
-                  ))}
+                      </article>
+                    )
+                  })}
                 </div>
 
                 {listings.length === 0 && (
@@ -757,12 +864,10 @@ Ghi lại khoảnh khắc theo cách của bạn! Trải nghiệm dịch vụ th
                   <button
                     type="button"
                     className="primary-button flex-1"
-                    onClick={() => {
-                      setSubmitted(true)
-                      setStepError('')
-                    }}
+                    disabled={submitting}
+                    onClick={handleCustomerBookingSubmit}
                   >
-                    Gửi yêu cầu thuê phòng
+                    {submitting ? 'Đang gửi...' : 'Gửi yêu cầu thuê phòng'}
                   </button>
                 </div>
 

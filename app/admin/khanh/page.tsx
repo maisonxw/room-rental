@@ -21,6 +21,8 @@ import {
   Camera,
   Layers,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Trash2,
   Edit,
   Building,
@@ -37,12 +39,14 @@ import {
   DEFAULT_STUDIO_IMAGE,
 } from '@/lib/data'
 import {
+  deleteBookingFromFirebase,
   deleteRoomFromFirebase,
   getBookingsFromFirebase,
   getPaymentSettingsFromFirebase,
   getRoomsFromFirebase,
   savePaymentSettingsToFirebase,
   saveRoomToFirebase,
+  updateBookingInFirebase,
   updateBookingStatusInFirebase,
 } from '@/lib/firebase-services'
 
@@ -51,8 +55,9 @@ export default function AdminDashboardPage() {
   const [auth, setAuth] = useState<{ username: string; loggedIn: boolean } | null>(null)
   const [checkingAuth, setCheckingAuth] = useState(true)
 
-  // Active Tab state: 'phong' | 'donhang' | 'quanly' | 'caidat'
-  const [activeTab, setActiveTab] = useState<'phong' | 'donhang' | 'quanly' | 'caidat'>('quanly')
+  // Active Tab state: 'phong' | 'donhang' | 'lich' | 'quanly' | 'caidat'
+  const [activeTab, setActiveTab] = useState<'phong' | 'donhang' | 'lich' | 'quanly' | 'caidat'>('quanly')
+  const [calendarDate, setCalendarDate] = useState(() => new Date().toISOString().slice(0, 10))
 
   // Rooms state
   const [roomsList, setRoomsList] = useState<Studio[]>([])
@@ -65,6 +70,7 @@ export default function AdminDashboardPage() {
     address: '',
     pricePerHour: 150000,
     pricePerDay: 1200000,
+    quantity: 1,
     guests: 2,
     bedrooms: 1,
     beds: 1,
@@ -80,6 +86,10 @@ export default function AdminDashboardPage() {
   })
   const [deleteRoomConfirm, setDeleteRoomConfirm] = useState<{ roomId: string | null; show: boolean }>({
     roomId: null,
+    show: false,
+  })
+  const [deleteBookingConfirm, setDeleteBookingConfirm] = useState<{ booking: BookingData | null; show: boolean }>({
+    booking: null,
     show: false,
   })
 
@@ -111,6 +121,7 @@ export default function AdminDashboardPage() {
       address: '',
       pricePerHour: 150000,
       pricePerDay: 1200000,
+      quantity: 1,
       guests: 2,
       bedrooms: 1,
       beds: 1,
@@ -125,6 +136,18 @@ export default function AdminDashboardPage() {
 
   // Bookings state
   const [bookingsList, setBookingsList] = useState<BookingData[]>([])
+  const [editingBooking, setEditingBooking] = useState<BookingData | null>(null)
+  const [bookingForm, setBookingForm] = useState({
+    customerName: '',
+    customerPhone: '',
+    customerEmail: '',
+    checkIn: '',
+    checkInTime: '',
+    checkOutTime: '',
+    specialRequests: '',
+    totalPrice: 0,
+    depositPrice: 0,
+  })
 
   // Payment settings state
   const [paymentConfig, setPaymentConfig] = useState<PaymentSettings>(defaultPaymentSettings)
@@ -169,16 +192,128 @@ export default function AdminDashboardPage() {
     router.push('/admin/login')
   }
 
+  const isActiveBookingStatus = (status: BookingStatus) => {
+    return status === 'da_xac_nhan' || status === 'confirmed' || status === 'dang_thue' || status === 'deposit_paid'
+  }
+
   // Handle changing booking status
   const handleStatusChange = async (bookingId: string, newStatus: BookingStatus) => {
+    const targetBooking = bookingsList.find((b) => b.id === bookingId || b.code === bookingId)
+
     setBookingsList((prev) =>
       prev.map((b) => (b.id === bookingId || b.code === bookingId ? { ...b, status: newStatus } : b))
     )
 
+    if (targetBooking) {
+      const oldStatus = targetBooking.status
+      const wasActive = isActiveBookingStatus(oldStatus)
+      const willBeActive = isActiveBookingStatus(newStatus)
+
+      if (wasActive !== willBeActive) {
+        const delta = willBeActive ? -1 : 1
+        const targetRoom = roomsList.find(
+          (r) => r.id === targetBooking.studioId || r.name === targetBooking.studioName
+        )
+
+        if (targetRoom) {
+          const updatedQuantity = Math.max(0, (targetRoom.quantity ?? 1) + delta)
+          const updatedRoom = { ...targetRoom, quantity: updatedQuantity }
+
+          setRoomsList((prev) =>
+            prev.map((r) => (r.id === targetRoom.id ? updatedRoom : r))
+          )
+
+          try {
+            await saveRoomToFirebase(updatedRoom)
+          } catch (err) {
+            console.error('Error updating room quantity in Firestore:', err)
+          }
+        }
+      }
+    }
+
     try {
-      await updateBookingStatusInFirebase(bookingId, newStatus)
+      await updateBookingStatusInFirebase(targetBooking?.id || bookingId, newStatus)
     } catch (error) {
       console.error('Error while updating booking status in Firestore:', error)
+    }
+  }
+
+  const handleEditBooking = (booking: BookingData) => {
+    setEditingBooking(booking)
+    setBookingForm({
+      customerName: booking.customerName || '',
+      customerPhone: booking.customerPhone || '',
+      customerEmail: booking.customerEmail || '',
+      checkIn: booking.checkIn || '',
+      checkInTime: booking.checkInTime || '',
+      checkOutTime: booking.checkOutTime || '',
+      specialRequests: booking.specialRequests || '',
+      totalPrice: Number(booking.totalPrice || 0),
+      depositPrice: Number(booking.depositPrice || 0),
+    })
+  }
+
+  const handleSaveBookingEdit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!editingBooking?.id) return
+
+    const updatedBooking: Partial<BookingData> = {
+      customerName: bookingForm.customerName,
+      customerPhone: bookingForm.customerPhone,
+      customerEmail: bookingForm.customerEmail,
+      checkIn: bookingForm.checkIn,
+      checkInTime: bookingForm.checkInTime,
+      checkOutTime: bookingForm.checkOutTime,
+      specialRequests: bookingForm.specialRequests,
+      totalPrice: Number(bookingForm.totalPrice) || 0,
+      depositPrice: Number(bookingForm.depositPrice) || 0,
+    }
+
+    try {
+      await updateBookingInFirebase(editingBooking.id, updatedBooking)
+      setBookingsList((prev) =>
+        prev.map((booking) => booking.id === editingBooking.id ? { ...booking, ...updatedBooking } : booking)
+      )
+      setEditingBooking(null)
+      setRoomActionToast({ message: 'Đơn thuê đã được cập nhật!', show: true })
+    } catch (error) {
+      console.error('Error updating booking:', error)
+    }
+  }
+
+  const handleDeleteBooking = (booking: BookingData) => {
+    setDeleteBookingConfirm({ booking, show: true })
+  }
+
+  const confirmDeleteBooking = async () => {
+    const booking = deleteBookingConfirm.booking
+    const bookingId = booking?.id
+    if (!bookingId) return
+
+    try {
+      await deleteBookingFromFirebase(bookingId)
+      setBookingsList((prev) => prev.filter((item) => item.id !== bookingId))
+
+      if (booking.status && isActiveBookingStatus(booking.status)) {
+        const targetRoom = roomsList.find((r) => r.id === booking.studioId || r.name === booking.studioName)
+        if (targetRoom) {
+          const updatedQuantity = (targetRoom.quantity ?? 1) + 1
+          const updatedRoom = { ...targetRoom, quantity: updatedQuantity }
+          setRoomsList((prev) => prev.map((r) => (r.id === targetRoom.id ? updatedRoom : r)))
+          try {
+            await saveRoomToFirebase(updatedRoom)
+          } catch (err) {
+            console.error('Error restoring room quantity on delete:', err)
+          }
+        }
+      }
+
+      setRoomActionToast({ message: 'Đơn thuê đã được xoá!', show: true })
+    } catch (error) {
+      console.error('Error deleting booking:', error)
+    } finally {
+      setDeleteBookingConfirm({ booking: null, show: false })
     }
   }
 
@@ -232,6 +367,7 @@ export default function AdminDashboardPage() {
       pricePerHour: Number(newRoom.pricePerHour) || 0,
       rating: 5.0,
       reviewCount: 1,
+      quantity: Math.max(1, Number(newRoom.quantity) || 1),
       guests: Number(newRoom.guests) || 2,
       bedrooms: Number(newRoom.bedrooms) || 0,
       beds: Number(newRoom.beds) || 0,
@@ -284,6 +420,7 @@ export default function AdminDashboardPage() {
       address: room.address,
       pricePerHour: room.pricePerHour,
       pricePerDay: room.pricePerDay,
+      quantity: room.quantity ?? 1,
       guests: room.guests,
       bedrooms: room.bedrooms,
       beds: room.beds,
@@ -368,6 +505,43 @@ export default function AdminDashboardPage() {
     reader.readAsDataURL(file)
   }
 
+  const calendarBookings = bookingsList
+    .filter((booking) => booking.checkIn === calendarDate)
+    .sort((a, b) => (a.checkInTime || '00:00').localeCompare(b.checkInTime || '00:00'))
+
+  const calendarDateLabel = new Intl.DateTimeFormat('vi-VN', {
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+  }).format(new Date(calendarDate))
+
+  const shiftCalendarDate = (offset: number) => {
+    const nextDate = new Date(calendarDate)
+    nextDate.setDate(nextDate.getDate() + offset)
+    setCalendarDate(nextDate.toISOString().slice(0, 10))
+  }
+
+  const getBookingTime = (booking: BookingData) => {
+    if (booking.rentalType === 'daily') return 'Cả ngày'
+    return booking.checkInTime || '00:00'
+  }
+
+  const getBookingStatusStyle = (status: BookingStatus) => {
+    if (status === 'cancelled') return 'border-rose-400 bg-rose-50 text-rose-700'
+    if (status === 'dang_thue') return 'border-emerald-400 bg-emerald-50 text-emerald-700'
+    if (status === 'da_xac_nhan' || status === 'confirmed' || status === 'deposit_paid') return 'border-blue-400 bg-blue-50 text-blue-700'
+    if (status === 'da_hoan_thanh' || status === 'completed') return 'border-slate-400 bg-slate-50 text-slate-700'
+    return 'border-amber-400 bg-amber-50 text-amber-700'
+  }
+
+  const getBookingStatusLabel = (status: BookingStatus) => {
+    if (status === 'cancelled') return 'Đã huỷ'
+    if (status === 'dang_thue') return 'Đang thuê'
+    if (status === 'da_xac_nhan' || status === 'confirmed' || status === 'deposit_paid') return 'Đã xác nhận'
+    if (status === 'da_hoan_thanh' || status === 'completed') return 'Đã hoàn thành'
+    return 'Chưa xác nhận'
+  }
+
   if (checkingAuth) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#f3edf7] text-sm text-muted-foreground font-medium">
@@ -427,6 +601,46 @@ export default function AdminDashboardPage() {
           </div>
         </div>
 
+        <div
+          className={`fixed left-1/2 top-1/2 z-[1002] -translate-x-1/2 -translate-y-1/2 rounded-3xl border border-rose-200 bg-white/95 px-5 py-4 shadow-[0_18px_45px_rgba(244,63,94,0.18)] backdrop-blur-xl transition-all duration-500 ease-out ${
+            deleteBookingConfirm.show
+              ? 'translate-y-0 opacity-100 scale-100'
+              : '-translate-y-8 opacity-0 scale-95 pointer-events-none'
+          }`}
+        >
+          <div className="flex items-center gap-5">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-rose-100 text-rose-600">
+              <TriangleAlert size={22} />
+            </div>
+            <div className="space-y-3">
+              <div>
+                <p className="text-base font-bold text-rose-900">Bạn có chắc chắn muốn xoá đơn thuê này không?</p>
+                {deleteBookingConfirm.booking && (
+                  <p className="mt-1 text-xs font-semibold text-slate-500">
+                    {deleteBookingConfirm.booking.code} · {deleteBookingConfirm.booking.customerName}
+                  </p>
+                )}
+              </div>
+              <div className="flex gap-2.5">
+                <button
+                  type="button"
+                  onClick={confirmDeleteBooking}
+                  className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white transition hover:bg-rose-700"
+                >
+                  Xoá đơn
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDeleteBookingConfirm({ booking: null, show: false })}
+                  className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-100"
+                >
+                  Huỷ
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* Top Header Row */}
         <header className="flex flex-wrap items-center justify-between gap-4 rounded-3xl bg-white/80 px-6 py-4 backdrop-blur shadow-sm border border-pink-200/60">
           <div className="flex items-center gap-3">
@@ -455,52 +669,40 @@ export default function AdminDashboardPage() {
           </div>
         </header>
 
-        {/* TOP SEGMENTED PILL TAB NAVIGATION BAR (Matching screenshot) */}
+        {/* TOP SEGMENTED PILL TAB NAVIGATION BAR */}
         <nav className="flex items-center justify-between gap-2 overflow-x-auto rounded-3xl bg-white/80 p-2 shadow-sm border border-white/60">
           <div className="flex flex-1 items-center justify-around gap-2 text-sm font-medium">
-            {/* Tab 1: Quản lý (Analytics Dashboard - Active Default & First) */}
             <button
               onClick={() => setActiveTab('quanly')}
-              className={`flex items-center gap-2 rounded-2xl px-6 py-3 transition ${activeTab === 'quanly'
-                  ? 'bg-[#fbf5e8] font-bold text-emerald-950 shadow-sm border border-amber-200/60'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-white/50'
-                }`}
+              className={`flex items-center gap-2 rounded-2xl px-6 py-3 transition ${activeTab === 'quanly' ? 'bg-[#fbf5e8] font-bold text-emerald-950 shadow-sm border border-amber-200/60' : 'text-muted-foreground hover:text-foreground hover:bg-white/50'}`}
             >
               <Settings size={18} className={activeTab === 'quanly' ? 'text-amber-600' : ''} />
               <span>Quản lý</span>
             </button>
-
-            {/* Tab 2: Máy ảnh / Phòng */}
             <button
               onClick={() => setActiveTab('phong')}
-              className={`flex items-center gap-2 rounded-2xl px-6 py-3 transition ${activeTab === 'phong'
-                  ? 'bg-[#fbf5e8] font-bold text-emerald-950 shadow-sm border border-amber-200/60'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-white/50'
-                }`}
+              className={`flex items-center gap-2 rounded-2xl px-6 py-3 transition ${activeTab === 'phong' ? 'bg-[#fbf5e8] font-bold text-emerald-950 shadow-sm border border-amber-200/60' : 'text-muted-foreground hover:text-foreground hover:bg-white/50'}`}
             >
               <Camera size={18} className={activeTab === 'phong' ? 'text-amber-600' : ''} />
               <span>Phòng</span>
             </button>
-
-            {/* Tab 3: Đơn hàng */}
             <button
               onClick={() => setActiveTab('donhang')}
-              className={`flex items-center gap-2 rounded-2xl px-6 py-3 transition ${activeTab === 'donhang'
-                  ? 'bg-[#fbf5e8] font-bold text-emerald-950 shadow-sm border border-amber-200/60'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-white/50'
-                }`}
+              className={`flex items-center gap-2 rounded-2xl px-6 py-3 transition ${activeTab === 'donhang' ? 'bg-[#fbf5e8] font-bold text-emerald-950 shadow-sm border border-amber-200/60' : 'text-muted-foreground hover:text-foreground hover:bg-white/50'}`}
             >
               <Box size={18} className={activeTab === 'donhang' ? 'text-indigo-600' : ''} />
               <span>Đơn hàng</span>
             </button>
-
-            {/* Tab 4: Cài đặt */}
+            <button
+              onClick={() => setActiveTab('lich')}
+              className={`flex items-center gap-2 rounded-2xl px-6 py-3 transition ${activeTab === 'lich' ? 'bg-[#fbf5e8] font-bold text-emerald-950 shadow-sm border border-amber-200/60' : 'text-muted-foreground hover:text-foreground hover:bg-white/50'}`}
+            >
+              <Calendar size={18} className={activeTab === 'lich' ? 'text-pink-600' : ''} />
+              <span>Lịch</span>
+            </button>
             <button
               onClick={() => setActiveTab('caidat')}
-              className={`flex items-center gap-2 rounded-2xl px-6 py-3 transition ${activeTab === 'caidat'
-                  ? 'bg-[#fbf5e8] font-bold text-emerald-950 shadow-sm border border-amber-200/60'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-white/50'
-                }`}
+              className={`flex items-center gap-2 rounded-2xl px-6 py-3 transition ${activeTab === 'caidat' ? 'bg-[#fbf5e8] font-bold text-emerald-950 shadow-sm border border-amber-200/60' : 'text-muted-foreground hover:text-foreground hover:bg-white/50'}`}
             >
               <QrCode size={18} className={activeTab === 'caidat' ? 'text-purple-600' : ''} />
               <span>Cài đặt</span>
@@ -703,6 +905,10 @@ export default function AdminDashboardPage() {
                     </div>
                   </div>
 
+                  <div className="rounded-2xl border border-pink-100 bg-pink-50/70 px-3 py-2 text-xs font-bold text-purple-950">
+                    Số lượng phòng: {room.quantity ?? 1}
+                  </div>
+
                   <div className="flex gap-2 pt-2">
                     <button
                       type="button"
@@ -788,6 +994,18 @@ export default function AdminDashboardPage() {
                           className="mt-1.5 w-full rounded-xl border border-pink-200 bg-white p-2.5 text-xs font-extrabold text-purple-950 focus:outline-none focus:ring-2 focus:ring-pink-400"
                         />
                       </div>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold uppercase text-purple-900">Số lượng phòng *</label>
+                      <input
+                        required
+                        type="number"
+                        min="1"
+                        value={newRoom.quantity}
+                        onChange={(e) => setNewRoom({ ...newRoom, quantity: Math.max(1, Number(e.target.value) || 1) })}
+                        className="mt-1.5 w-full rounded-2xl border border-pink-200 bg-pink-50/30 p-3 text-xs font-extrabold text-purple-950 focus:outline-none focus:ring-2 focus:ring-pink-400"
+                      />
                     </div>
 
                     <div>
@@ -920,21 +1138,122 @@ export default function AdminDashboardPage() {
                         <select
                           value={booking.status}
                           onChange={(e) => handleStatusChange(booking.id || booking.code, e.target.value as BookingStatus)}
-                          className={`rounded-xl px-3.5 py-2 text-xs font-bold border outline-none cursor-pointer transition ${booking.status === 'chua_xac_nhan' || booking.status === 'pending'
-                              ? 'bg-amber-100 text-amber-900 border-amber-300'
+                          className={`rounded-2xl border border-pink-200 bg-pink-50/80 px-4 py-2 text-xs font-extrabold shadow-sm outline-none cursor-pointer transition focus:border-pink-400 focus:bg-white focus:ring-4 focus:ring-pink-100 ${booking.status === 'chua_xac_nhan' || booking.status === 'pending'
+                              ? 'text-amber-800'
                               : booking.status === 'da_xac_nhan' || booking.status === 'confirmed' || booking.status === 'deposit_paid'
-                                ? 'bg-blue-100 text-blue-900 border-blue-300'
+                                ? 'text-blue-800'
                                 : booking.status === 'dang_thue'
-                                  ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
-                                  : 'bg-purple-100 text-purple-900 border-purple-200'
+                                  ? 'text-emerald-800'
+                                  : booking.status === 'cancelled'
+                                    ? 'text-rose-800'
+                                    : 'text-fuchsia-800'
                             }`}
                         >
                           <option value="chua_xac_nhan">🟠 Chưa xác nhận</option>
                           <option value="da_xac_nhan">🔵 Đã xác nhận</option>
                           <option value="dang_thue">🟢 Đang thuê</option>
                           <option value="da_hoan_thanh">⬛ Đã hoàn thành</option>
+                          <option value="cancelled">🔴 Đã huỷ</option>
                         </select>
                       </div>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          title="Chỉnh sửa đơn thuê"
+                          onClick={() => handleEditBooking(booking)}
+                          className="grid h-9 w-9 place-items-center rounded-full border border-pink-200 bg-pink-50 text-pink-600 shadow-sm transition hover:-translate-y-0.5 hover:bg-pink-100"
+                        >
+                          <Edit size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          title="Xoá đơn thuê"
+                          onClick={() => handleDeleteBooking(booking)}
+                          className="grid h-9 w-9 place-items-center rounded-full border border-rose-200 bg-rose-50 text-rose-600 shadow-sm transition hover:-translate-y-0.5 hover:bg-rose-100"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+
+        {activeTab === 'lich' && (
+          <div className="space-y-6">
+            <div className="rounded-3xl border border-white/60 bg-white/80 p-6 shadow-sm">
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h2 className="font-serif text-3xl font-extrabold capitalize text-pink-600">{calendarDateLabel}</h2>
+                  <p className="mt-1 text-sm font-medium text-muted-foreground">Theo dõi lịch thuê phòng và trạng thái đơn trong ngày.</p>
+                </div>
+                <div className="flex items-center gap-2 rounded-full border border-pink-100 bg-white p-1 shadow-sm">
+                  <button type="button" onClick={() => shiftCalendarDate(-1)} className="grid h-9 w-9 place-items-center rounded-full hover:bg-pink-50">
+                    <ChevronLeft size={16} />
+                  </button>
+                  <button type="button" onClick={() => setCalendarDate(new Date().toISOString().slice(0, 10))} className="rounded-full bg-pink-600 px-4 py-2 text-xs font-bold text-white shadow-sm">
+                    Hôm nay
+                  </button>
+                  <button type="button" onClick={() => shiftCalendarDate(1)} className="grid h-9 w-9 place-items-center rounded-full hover:bg-pink-50">
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-6 lg:grid-cols-[1.25fr_0.75fr]">
+              <div className="rounded-3xl border border-white/60 bg-white/85 p-5 shadow-[0_20px_50px_rgba(236,72,153,0.10)]">
+                <div className="flex items-center justify-between border-b border-pink-100 pb-4">
+                  <div className="flex items-center gap-2 text-sm font-extrabold text-fuchsia-950">
+                    <Clock size={16} className="text-pink-500" /> Trực thời gian
+                  </div>
+                  <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-600">Live</span>
+                </div>
+
+                <div className="mt-5 max-h-[560px] overflow-y-auto pr-2">
+                  {Array.from({ length: 17 }, (_, index) => index + 6).map((hour) => {
+                    const hourBookings = calendarBookings.filter((booking) => {
+                      if (booking.rentalType === 'daily') return hour === 8
+                      return Number((booking.checkInTime || '00:00').split(':')[0]) === hour
+                    })
+
+                    return (
+                      <div key={hour} className="grid min-h-16 grid-cols-[52px_1fr] gap-4 border-b border-pink-50 py-3">
+                        <div className="pt-1 text-xs font-bold text-slate-300">{`${hour.toString().padStart(2, '0')}:00`}</div>
+                        <div className="flex flex-wrap gap-2">
+                          {hourBookings.map((booking) => (
+                            <div key={booking.id || booking.code} className={`rounded-full border px-4 py-2 text-xs font-bold shadow-sm ${getBookingStatusStyle(booking.status)}`}>
+                              {booking.studioName} - {booking.customerName}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <h3 className="px-1 text-xs font-extrabold uppercase tracking-[0.22em] text-slate-400">Sự kiện trong ngày</h3>
+                {calendarBookings.length === 0 && (
+                  <div className="rounded-3xl border border-white/70 bg-white/80 p-6 text-center text-sm font-semibold text-muted-foreground shadow-sm">
+                    Chưa có đơn thuê nào trong ngày này.
+                  </div>
+                )}
+                {calendarBookings.map((booking) => (
+                  <div key={booking.id || booking.code} className={`rounded-3xl border-l-4 bg-white p-5 shadow-sm ${getBookingStatusStyle(booking.status)}`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="rounded-full bg-white/80 px-3 py-1 text-[10px] font-extrabold uppercase">{getBookingStatusLabel(booking.status)}</span>
+                      <span className="text-xs font-bold text-slate-400">{getBookingTime(booking)}</span>
+                    </div>
+                    <h4 className="mt-3 text-base font-extrabold text-slate-950">{booking.customerName}</h4>
+                    <p className="mt-1 text-xs font-semibold text-slate-500">{booking.studioName}</p>
+                    <div className="mt-4 border-t border-slate-100 pt-3 text-xs font-bold text-slate-500">
+                      {booking.customerPhone} · {formatCurrency(booking.totalPrice)}
                     </div>
                   </div>
                 ))}
@@ -1037,6 +1356,65 @@ export default function AdminDashboardPage() {
             </form>
           </div>
         )}
+
+        {editingBooking && (
+          <div className="modal-backdrop">
+            <div className="booking-modal max-w-2xl rounded-3xl border border-white/80 bg-white/95 p-6 md:p-8 shadow-2xl shadow-pink-500/20 backdrop-blur-xl">
+              <button
+                type="button"
+                onClick={() => setEditingBooking(null)}
+                className="absolute right-5 top-5 rounded-full bg-pink-100/80 p-2 text-pink-700 hover:bg-pink-200 transition"
+              >
+                <X size={18} />
+              </button>
+
+              <h2 className="font-bold text-2xl text-purple-950">Chỉnh sửa đơn thuê</h2>
+              <p className="mt-1 text-xs font-medium text-muted-foreground">Cập nhật thông tin theo yêu cầu của khách hàng.</p>
+
+              <form onSubmit={handleSaveBookingEdit} className="mt-6 grid gap-4 text-sm sm:grid-cols-2">
+                <label className="space-y-1.5">
+                  <span className="text-xs font-bold uppercase text-purple-900">Tên khách</span>
+                  <input required value={bookingForm.customerName} onChange={(e) => setBookingForm({ ...bookingForm, customerName: e.target.value })} className="w-full rounded-2xl border border-pink-200 bg-pink-50/30 p-3 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-pink-400" />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-bold uppercase text-purple-900">Số điện thoại</span>
+                  <input required value={bookingForm.customerPhone} onChange={(e) => setBookingForm({ ...bookingForm, customerPhone: e.target.value })} className="w-full rounded-2xl border border-pink-200 bg-pink-50/30 p-3 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-pink-400" />
+                </label>
+                <label className="space-y-1.5 sm:col-span-2">
+                  <span className="text-xs font-bold uppercase text-purple-900">Instagram / Email</span>
+                  <input value={bookingForm.customerEmail} onChange={(e) => setBookingForm({ ...bookingForm, customerEmail: e.target.value })} className="w-full rounded-2xl border border-pink-200 bg-pink-50/30 p-3 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-pink-400" />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-bold uppercase text-purple-900">Ngày thuê</span>
+                  <input type="date" value={bookingForm.checkIn} onChange={(e) => setBookingForm({ ...bookingForm, checkIn: e.target.value })} className="w-full rounded-2xl border border-pink-200 bg-pink-50/30 p-3 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-pink-400" />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-bold uppercase text-purple-900">Giờ bắt đầu</span>
+                  <input type="time" value={bookingForm.checkInTime} onChange={(e) => setBookingForm({ ...bookingForm, checkInTime: e.target.value })} className="w-full rounded-2xl border border-pink-200 bg-pink-50/30 p-3 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-pink-400" />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-bold uppercase text-purple-900">Giờ kết thúc</span>
+                  <input type="time" value={bookingForm.checkOutTime} onChange={(e) => setBookingForm({ ...bookingForm, checkOutTime: e.target.value })} className="w-full rounded-2xl border border-pink-200 bg-pink-50/30 p-3 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-pink-400" />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-bold uppercase text-purple-900">Tổng tiền</span>
+                  <input type="number" value={bookingForm.totalPrice} onChange={(e) => setBookingForm({ ...bookingForm, totalPrice: Number(e.target.value) })} className="w-full rounded-2xl border border-pink-200 bg-pink-50/30 p-3 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-pink-400" />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-bold uppercase text-purple-900">Tiền cọc</span>
+                  <input type="number" value={bookingForm.depositPrice} onChange={(e) => setBookingForm({ ...bookingForm, depositPrice: Number(e.target.value) })} className="w-full rounded-2xl border border-pink-200 bg-pink-50/30 p-3 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-pink-400" />
+                </label>
+                <label className="space-y-1.5 sm:col-span-2">
+                  <span className="text-xs font-bold uppercase text-purple-900">Ghi chú / yêu cầu</span>
+                  <textarea rows={3} value={bookingForm.specialRequests} onChange={(e) => setBookingForm({ ...bookingForm, specialRequests: e.target.value })} className="w-full rounded-2xl border border-pink-200 bg-pink-50/30 p-3 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-pink-400" />
+                </label>
+                <button type="button" onClick={() => setEditingBooking(null)} className="secondary-button justify-center">Huỷ</button>
+                <button type="submit" className="primary-button justify-center">Lưu chỉnh sửa</button>
+              </form>
+            </div>
+          </div>
+        )}
+
       </div>
     </main>
   )

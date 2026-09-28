@@ -6,6 +6,10 @@ export const metadata: Metadata = {
   title: 'chupchoet.room — Cho thuê Studio chụp ảnh chuyên nghiệp',
   description: 'Hệ thống đặt lịch thuê phòng Studio chụp hình, concept phong phú, đầy đủ thiết bị ánh sáng tại chupchoet.room.',
   generator: 'v0.app',
+  icons: {
+    icon: '/icon.svg',
+    apple: '/apple-icon.png',
+  },
 }
 
 export const viewport: Viewport = {
