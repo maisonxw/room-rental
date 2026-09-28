@@ -109,9 +109,9 @@ const stepsConfig: { key: BookingStep; label: string; icon: LucideIcon }[] = [
 ]
 
 const depositOptions = [
-  { value: 'bank-transfer', label: 'Chuyển khoản đặt cọc 30%' },
-  { value: 'cash', label: 'Thanh toán cọc tại studio' },
-  { value: 'contact', label: 'Liên hệ studio để xác nhận phương thức cọc' },
+  { value: 'bank-transfer', label: 'Cọc CCCD +tài sản tương đương (Laptop, Macbook, xe máy,...)' },
+  { value: 'cash', label: 'Cọc CCCD + 80% giá trị máy' },
+  { value: 'contact', label: 'Cọc 100% giá trị máy' },
 ]
 
 const blockingBookingStatuses = new Set<BookingStatus>(['da_xac_nhan', 'dang_thue', 'confirmed'])
@@ -336,7 +336,7 @@ export default function HomePage() {
               Thuê phòng chụp ảnh theo luồng đặt lịch rõ ràng.
             </h1>
             <p className="mx-auto mt-5 max-w-2xl text-base leading-7 text-fuchsia-950/70 md:text-lg">
-Ghi lại khoảnh khắc theo cách của bạn! Trải nghiệm dịch vụ thuê phòng chuyên nghiệp.
+              Ghi lại khoảnh khắc theo cách của bạn! Trải nghiệm dịch vụ thuê phòng chuyên nghiệp.
 
             </p>
             <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
@@ -375,13 +375,12 @@ Ghi lại khoảnh khắc theo cách của bạn! Trải nghiệm dịch vụ th
                     className="booking-step-button"
                   >
                     <span
-                      className={`booking-step-circle ${
-                        isActive
-                          ? 'active'
+                      className={`booking-step-circle ${isActive
+                        ? 'active'
                         : isCompleted
-                            ? 'completed'
-                            : ''
-                      }`}
+                          ? 'completed'
+                          : ''
+                        }`}
                     >
                       {isCompleted ? <Check size={18} /> : <Icon size={18} />}
                     </span>
@@ -648,9 +647,9 @@ Ghi lại khoảnh khắc theo cách của bạn! Trải nghiệm dịch vụ th
             )}
 
             {step === 'details' && (
-              
+
               <div className="booking-card mx-auto max-w-3xl">
-                
+
                 <div>
                   <h2 className="text-2xl font-bold text-fuchsia-950">Thông tin khách hàng</h2>
                   <p className="mt-1 text-sm text-fuchsia-950/60">Vui lòng điền đầy đủ thông tin để hoàn tất đặt thuê.</p>
